@@ -8,3 +8,6 @@ scikit-learn
 tqdm
 torchrec-nightly
 torchx-nightly
+tensorboard
+#mlperf-logging==3.0.0
+# pip install "git+https://github.com/mlperf/logging.git@4.1.0-rc3"

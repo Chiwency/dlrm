@@ -150,6 +150,7 @@ def processCriteoAdData(d_path, d_file, npzfile, i, convertDicts, pre_comp_count
                     X_cat_t[j, k] = convertDicts[j][x]
             # continuous features
             X_int = data["X_int"]
+            # convert negative integer values to 0
             X_int[X_int < 0] = 0
             # targets
             y = data["y"]
@@ -172,17 +173,17 @@ def processCriteoAdData(d_path, d_file, npzfile, i, convertDicts, pre_comp_count
 
 
 def concatCriteoAdData(
-    d_path,
-    d_file,
-    npzfile,
-    trafile,
-    days,
-    data_split,
-    randomize,
-    total_per_file,
-    total_count,
-    memory_map,
-    o_filename,
+        d_path,
+        d_file,
+        npzfile,
+        trafile,
+        days,
+        data_split,
+        randomize,
+        total_per_file,
+        total_count,
+        memory_map,
+        o_filename,
 ):
     # Concatenates different days and saves the result.
     #
@@ -563,9 +564,9 @@ def concatCriteoAdData(
             filename_j_d = npzfile + "_{0}_intermediate_d.npy".format(j)
             filename_j_s = npzfile + "_{0}_intermediate_s.npy".format(j)
             if (
-                path.exists(filename_j_y)
-                and path.exists(filename_j_d)
-                and path.exists(filename_j_s)
+                    path.exists(filename_j_y)
+                    and path.exists(filename_j_d)
+                    and path.exists(filename_j_s)
             ):
                 print(
                     "Using existing\n"
@@ -878,16 +879,16 @@ def transformCriteoAdData(X_cat, X_int, y, days, data_split, randomize, total_pe
 
 
 def getCriteoAdData(
-    datafile,
-    o_filename,
-    max_ind_range=-1,
-    sub_sample_rate=0.0,
-    days=7,
-    data_split="train",
-    randomize="total",
-    criteo_kaggle=True,
-    memory_map=False,
-    dataset_multiprocessing=False,
+        datafile,
+        o_filename,
+        max_ind_range=-1,
+        sub_sample_rate=0.0,
+        days=7,
+        data_split="train",
+        randomize="total",
+        criteo_kaggle=True,
+        memory_map=False,
+        dataset_multiprocessing=False,
 ):
     # Passes through entire dataset and defines dictionaries for categorical
     # features and determines the number of total categories.
@@ -915,7 +916,9 @@ def getCriteoAdData(
         print("Skipping counts per file (already exist)")
     else:
         total_count = 0
+        # store each day's data count in a separate file
         total_per_file = []
+        # generate train_day_{i} files: represent the splited data into days
         if criteo_kaggle:
             # WARNING: The raw data consists of a single train.txt file
             # Each line in the file is a sample, consisting of 13 continuous and
@@ -970,24 +973,28 @@ def getCriteoAdData(
                         "ERROR: Criteo Terabyte Dataset path is invalid; please download from https://labs.criteo.com/2013/12/download-terabyte-click-logs"
                     )
 
-    # process a file worth of data and reinitialize data
-    # note that a file main contain a single or multiple splits
+    # read raw data and split target_y, X_cat, X_int features, and
+    # store them in separate compressed numpy files.
     def process_one_file(
-        datfile,
-        npzfile,
-        split,
-        num_data_in_split,
-        dataset_multiprocessing,
-        convertDictsDay=None,
-        resultDay=None,
+            datfile,  # ./kaggle-display-advertising-challenge-dataset/train_day_{i}
+            npzfile,  # ./kaggle-display-advertising-challenge-dataset/train_day
+            split,  # i: day number
+            num_data_in_split,  # total_per_file[i]
+            dataset_multiprocessing,
+            convertDictsDay=None,
+            resultDay=None,
     ):
+        print("process: " + datfile)
         if dataset_multiprocessing:
             convertDicts_day = [{} for _ in range(26)]
 
         with open(str(datfile)) as f:
+            # y stores the target variable (0 or 1)
             y = np.zeros(num_data_in_split, dtype="i4")  # 4 byte int
             X_int = np.zeros((num_data_in_split, 13), dtype="i4")  # 4 byte int
-            X_cat = np.zeros((num_data_in_split, 26), dtype="i4")  # 4 byte int
+            X_cat = np.zeros((num_data_in_split, 26), dtype=np.uint32)  # 4 byte int
+            # if we set sub_sample_rate to a positive value, we will apply sub-sampling to reduce the number of zero targets
+            # as the are much more zero than one targets.
             if sub_sample_rate == 0.0:
                 rand_u = 1.0
             else:
@@ -1005,22 +1012,21 @@ def getCriteoAdData(
                 # sub-sample data by dropping zero targets, if needed
                 target = np.int32(line[0])
                 if (
-                    target == 0
-                    and (rand_u if sub_sample_rate == 0.0 else rand_u[k])
-                    < sub_sample_rate
+                        target == 0
+                        and (rand_u if sub_sample_rate == 0.0 else rand_u[k])
+                        < sub_sample_rate
                 ):
                     continue
 
                 y[i] = target
-                X_int[i] = np.array(line[1:14], dtype=np.int32)
+                X_int[i] = np.array(line[1:14])
                 if max_ind_range > 0:
                     X_cat[i] = np.array(
                         list(map(lambda x: int(x, 16) % max_ind_range, line[14:])),
-                        dtype=np.int32,
                     )
                 else:
                     X_cat[i] = np.array(
-                        list(map(lambda x: int(x, 16), line[14:])), dtype=np.int32
+                        list(map(lambda x: int(x, 16), line[14:]))
                     )
 
                 # count uniques
@@ -1043,6 +1049,7 @@ def getCriteoAdData(
                             end="\n",
                         )
                 else:
+                    # deduplication of each column
                     for j in range(26):
                         convertDicts[j][X_cat[i][j]] = 1
                     # debug prints
@@ -1088,6 +1095,7 @@ def getCriteoAdData(
 
     # create all splits (reuse existing files if possible)
     recreate_flag = False
+    # 26 dictionaries for categorical features
     convertDicts = [{} for _ in range(26)]
     # WARNING: to get reproducable sub-sampling results you must reset the seed below
     # np.random.seed(123)
@@ -1143,7 +1151,7 @@ def getCriteoAdData(
                     dataset_multiprocessing,
                 )
 
-    # report and save total into a file
+    # report and save total into a file    _day_count.npz
     total_count = np.sum(total_per_file)
     if not path.exists(total_file):
         np.savez_compressed(total_file, total_per_file=total_per_file)
@@ -1151,16 +1159,17 @@ def getCriteoAdData(
     print("Divided into days/splits:\n", total_per_file)
 
     # dictionary files
-    counts = np.zeros(26, dtype=np.int32)
+    counts = np.zeros(26, dtype=np.uint32)
     if recreate_flag:
         # create dictionaries
         for j in range(26):
+            # convert every unique categorical feature's value(uint32) to an index
             for i, x in enumerate(convertDicts[j]):
                 convertDicts[j][x] = i
             dict_file_j = d_path + d_file + "_fea_dict_{0}.npz".format(j)
             if not path.exists(dict_file_j):
                 np.savez_compressed(
-                    dict_file_j, unique=np.array(list(convertDicts[j]), dtype=np.int32)
+                    dict_file_j, unique=np.array(list(convertDicts[j]), dtype=np.uint32)
                 )
             counts[j] = len(convertDicts[j])
         # store (uniques and) counts
@@ -1222,14 +1231,14 @@ def getCriteoAdData(
 
 
 def loadDataset(
-    dataset,
-    max_ind_range,
-    sub_sample_rate,
-    randomize,
-    data_split,
-    raw_path="",
-    pro_data="",
-    memory_map=False,
+        dataset,
+        max_ind_range,
+        sub_sample_rate,
+        randomize,
+        data_split,
+        raw_path="",
+        pro_data="",
+        memory_map=False,
 ):
     # dataset
     if dataset == "kaggle":
@@ -1295,6 +1304,15 @@ if __name__ == "__main__":
     parser.add_argument("--data-set", type=str, default="kaggle")  # or terabyte
     parser.add_argument("--raw-data-file", type=str, default="")
     parser.add_argument("--processed-data-file", type=str, default="")
+    parser.add_argument(
+        "--dataset-multiprocessing",
+        action="store_true",
+        default=False,
+        help="The Kaggle dataset can be multiprocessed in an environment \
+                        with more than 7 CPU cores and more than 20 GB of memory. \n \
+                        The Terabyte dataset can be multiprocessed in an environment \
+                        with more than 24 CPU cores and at least 1 TB of memory.",
+    )
     args = parser.parse_args()
 
     loadDataset(

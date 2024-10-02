@@ -959,6 +959,8 @@ def run():
     parser.add_argument("--processed-data-file", type=str, default="")
     parser.add_argument("--data-randomize", type=str, default="total")  # or day or none
     parser.add_argument("--data-trace-enable-padding", type=bool, default=False)
+    # maxind range: maximum number of indices to use per embedding lookup, to save memory
+    # in this project, we use mod max-ind-range to limit the number of indices per lookup
     parser.add_argument("--max-ind-range", type=int, default=-1)
     parser.add_argument("--data-sub-sample-rate", type=float, default=0.0)  # in [0, 1]
     parser.add_argument("--num-indices-per-lookup", type=int, default=10)
@@ -1029,6 +1031,7 @@ def run():
     global writer
     args = parser.parse_args()
 
+    # check python version
     if args.dataset_multiprocessing:
         assert sys.version_info[0] >= 3 and sys.version_info[1] > 7, (
             "The dataset_multiprocessing "
@@ -1042,11 +1045,13 @@ def run():
             key=mlperf_logger.constants.INIT_START, log_all_ranks=True
         )
 
+    # weighted_pooling: None, "fixed", "learned"  aggrate the feautres with different weights
     if args.weighted_pooling is not None:
         if args.qr_flag:
             sys.exit("ERROR: quotient remainder with weighted pooling is not supported")
         if args.md_flag:
             sys.exit("ERROR: mixed dimensions with weighted pooling is not supported")
+    # quantize_emb_with_bit: None, 4, 8  quantize the embedding table with 4 or 8-bit, that is to say, convert float to int with 4 or 8 bits to reduce memory footprint.
     if args.quantize_emb_with_bit in [4, 8]:
         if args.qr_flag:
             sys.exit(
@@ -1060,11 +1065,14 @@ def run():
             sys.exit("ERROR: 4 and 8-bit quantization on GPU is not supported")
 
     ### some basic setup ###
+    # numpy-rand-seed: type=int, default is 123
     np.random.seed(args.numpy_rand_seed)
+    # print-precision: type=int, default is 5  (number of digits of float to print)
     np.set_printoptions(precision=args.print_precision)
     torch.set_printoptions(precision=args.print_precision)
     torch.manual_seed(args.numpy_rand_seed)
 
+    # test-mini-batch-size: type=int, default is -1 (use training batch size)
     if args.test_mini_batch_size < 0:
         # if the parameter is not set, use the training batch size
         args.test_mini_batch_size = args.mini_batch_size
@@ -1072,8 +1080,10 @@ def run():
         # if the parameter is not set, use the same parameter for training
         args.test_num_workers = args.num_workers
 
+    # use-gpu: default is False
     use_gpu = args.use_gpu and torch.cuda.is_available()
 
+    # debug-mode: default is False
     if not args.debug_mode:
         ext_dist.init_distributed(
             local_rank=args.local_rank, use_gpu=use_gpu, backend=args.dist_backend
@@ -1081,35 +1091,43 @@ def run():
 
     if use_gpu:
         torch.cuda.manual_seed_all(args.numpy_rand_seed)
+        # cudnn.deterministic = True is slower, but ensures that the results are reproducible
         torch.backends.cudnn.deterministic = True
         if ext_dist.my_size > 1:
             ngpus = 1
             device = torch.device("cuda", ext_dist.my_local_rank)
         else:
             ngpus = torch.cuda.device_count()
-            device = torch.device("cuda", 0)
+            device = torch.device("cuda", 0)    # GPU 0: NVIDIA TITAN V  GPU 1: Tesla P4
         print("Using {} GPU(s)...".format(ngpus))
     else:
         device = torch.device("cpu")
         print("Using CPU...")
 
     ### prepare training data ###
+    # arch-mlp-bot: type=str, default is "4-3-2" (describe the bottom mlp layers)
     ln_bot = np.fromstring(args.arch_mlp_bot, dtype=int, sep="-")
     # input data
 
     if args.mlperf_logging:
+        # synchronize all ranks before starting the training loop
         mlperf_logger.barrier()
         mlperf_logger.log_end(key=mlperf_logger.constants.INIT_STOP)
         mlperf_logger.barrier()
         mlperf_logger.log_start(key=mlperf_logger.constants.RUN_START)
         mlperf_logger.barrier()
 
+    # data-generation: type=str, "dataset" "internal" "random"(default)
     if args.data_generation == "dataset":
         train_data, train_ld, test_data, test_ld = dp.make_criteo_data_and_loaders(args)
+        # train_data.counts=26   {0:0, 1:1, 2:2, 3:3, 4:4, 5:5, 6:6, 7:7, 8:8, 9:9, 10:10, 11:11, 12:12 ..... }
         table_feature_map = {idx: idx for idx in range(len(train_data.counts))}
+
+        # len(train_ld) return the number of rows in the training set
         nbatches = args.num_batches if args.num_batches > 0 else len(train_ld)
         nbatches_test = len(test_ld)
 
+        # number of unique category items of each feature
         ln_emb = train_data.counts
         # enforce maximum limit on number of vectors per embedding
         if args.max_ind_range > 0:
@@ -1135,6 +1153,7 @@ def run():
         m_den = ln_bot[0]
     else:
         # input and target at random
+        # arch-embedding-size: type=str, default is "4-3-2" (describe the embedding dimensions)
         ln_emb = np.fromstring(args.arch_embedding_size, dtype=int, sep="-")
         m_den = ln_bot[0]
         train_data, train_ld, test_data, test_ld = dp.make_random_data_and_loader(
@@ -1150,9 +1169,11 @@ def run():
     ### parse command line arguments ###
     m_spa = args.arch_sparse_feature_size
     ln_emb = np.asarray(ln_emb)
+    # maybe mlp produce 1 dense output ?
     num_fea = ln_emb.size + 1  # num sparse + num dense features
-
+    # ln_bot: [12 3 2]
     m_den_out = ln_bot[ln_bot.size - 1]
+    # default: dot
     if args.arch_interaction_op == "dot":
         # approach 1: all
         # num_int = num_fea * num_fea + m_den_out
@@ -1169,7 +1190,9 @@ def run():
             + args.arch_interaction_op
             + " is not supported"
         )
+    # arch-mlp-top: type=str, default is "4-2-1" (describe the top mlp layers)  here is 353-4-2-1
     arch_mlp_top_adjusted = str(num_int) + "-" + args.arch_mlp_top
+    # here is 353-4-2-1
     ln_top = np.fromstring(arch_mlp_top_adjusted, dtype=int, sep="-")
 
     # sanity check: feature sizes and mlp dimensions must match
@@ -1290,11 +1313,11 @@ def run():
         ln_emb,
         ln_bot,
         ln_top,
-        arch_interaction_op=args.arch_interaction_op,
-        arch_interaction_itself=args.arch_interaction_itself,
-        sigmoid_bot=-1,
-        sigmoid_top=ln_top.size - 2,
-        sync_dense_params=args.sync_dense_params,
+        arch_interaction_op=args.arch_interaction_op,    # 指定交互操作的类型（如点积、拼接等）
+        arch_interaction_itself=args.arch_interaction_itself,  # 是否包含自身的交互
+        sigmoid_bot=-1,  # 表示底部 MLP 层的 sigmoid 激活层位置，通常为 -1 表示不使用
+        sigmoid_top=ln_top.size - 2, # 表示顶部 MLP 层的 sigmoid 激活层位置，通常设置为顶部层数减 2
+        sync_dense_params=args.sync_dense_params, # 指示模型在分布式训练环境中是否需要同步稠密参数
         loss_threshold=args.loss_threshold,
         ndevices=ndevices,
         qr_flag=args.qr_flag,
@@ -1338,6 +1361,7 @@ def run():
             dlrm.bot_l = ext_dist.DDP(dlrm.bot_l)
             dlrm.top_l = ext_dist.DDP(dlrm.top_l)
 
+    # default: False
     if not args.inference_only:
         if use_gpu and args.optimizer in ["rwsadagrad", "adagrad"]:
             sys.exit("GPU version of Adagrad is not supported by PyTorch.")
@@ -1509,14 +1533,17 @@ def run():
         )
         mlperf_logger.log_event(key="sgd_opt_learning_rate_decay_poly_power", value=2)
 
+    # tensor-board-filename: default is "run_kaggle_pt"
     tb_file = "./" + args.tensor_board_filename
     writer = SummaryWriter(tb_file)
 
     ext_dist.barrier()
+    # begin training loop
     with torch.autograd.profiler.profile(
         args.enable_profiling, use_cuda=use_gpu, record_shapes=True
     ) as prof:
         if not args.inference_only:
+            # current epoch number
             k = 0
             total_time_begin = 0
             while k < args.nepochs:

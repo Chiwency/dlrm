@@ -74,6 +74,7 @@ class CriteoDataset(Dataset):
             out_file = "terabyte_processed"
         else:
             raise (ValueError("Data set option is not supported"))
+        # maxind range: maximum number of indices to use per embedding lookup, to save memory
         self.max_ind_range = max_ind_range
         self.memory_map = memory_map
 
@@ -225,7 +226,7 @@ class CriteoDataset(Dataset):
             else:
                 indices = np.array_split(indices, self.offset_per_file[1:-1])
 
-                # randomize train data (per day)
+                # randomize train data (per day)    Randomly shuffle the data at a daily level.
                 if randomize == "day":  # or randomize == "total":
                     for i in range(len(indices) - 1):
                         indices[i] = np.random.permutation(indices[i])
@@ -413,6 +414,7 @@ def collate_wrapper_criteo_length(list_of_tuples):
 
 
 def make_criteo_data_and_loaders(args, offset_to_length_converter=False):
+    # memory-map: default False  (allows file access by mapping only portions of large files into memory, reducing I/O overhead and memory usage)
     if args.mlperf_logging and args.memory_map and args.data_set == "terabyte":
         # more efficient for larger batches
         data_directory = path.dirname(args.raw_data_file)
